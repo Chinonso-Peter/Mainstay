@@ -26,6 +26,13 @@ pub struct Asset {
 
 const ASSET_COUNT: Symbol = symbol_short!("A_COUNT");
 
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    MetadataTooLong = 1,
+}
+
 fn asset_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("ASSET"), id)
 }
