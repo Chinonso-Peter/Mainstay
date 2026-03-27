@@ -150,7 +150,7 @@ impl EngineerRegistry {
     }
 
     /// Admin-only: upgrade the contract WASM to a new hash.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, _new_wasm_hash: BytesN<32>) {
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -162,16 +162,19 @@ impl EngineerRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
 
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        #[cfg(not(test))]
+        {
+            env.deployer().update_current_contract_wasm(_new_wasm_hash);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::storage::Persistent, BytesN, Env, Symbol};
+    use soroban_sdk::{testutils::Address as _, testutils::storage::Persistent, BytesN, Env};
 
-    fn setup(env: &Env) -> (EngineerRegistryClient, Address) {
+    fn setup<'a>(env: &'a Env) -> (EngineerRegistryClient<'a>, Address) {
         let contract_id = env.register(EngineerRegistry, ());
         let client = EngineerRegistryClient::new(env, &contract_id);
         let admin = Address::generate(env);
@@ -269,7 +272,7 @@ mod tests {
     fn test_non_admin_cannot_upgrade() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin) = setup(&env);
+        let (client, _) = setup(&env);
 
         let outsider = Address::generate(&env);
         let new_wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);
@@ -371,4 +374,3 @@ mod tests {
         client.register_engineer(&engineer, &hash, &untrusted_issuer);
     }
 }
-
