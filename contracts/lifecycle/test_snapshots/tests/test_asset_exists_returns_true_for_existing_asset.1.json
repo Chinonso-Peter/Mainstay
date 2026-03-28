@@ -18,7 +18,7 @@
                   "symbol": "GENSET"
                 },
                 {
-                  "string": "CAT-3516"
+                  "string": "Turbine X"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -100,7 +100,15 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "string": "CAT-3516"
+                        "string": "Turbine X"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "metadata_updated_at"
+                      },
+                      "val": {
+                        "u64": 0
                       }
                     },
                     {
@@ -141,7 +149,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "bytes": "931ba7e7bca61b41b271f75bd65b4c29ba79fd9e7a2eec32823cc2f1c53dc008"
+                  "bytes": "e6f74c4e510e8d8daf1151a2e9dc206d54021d717666baacf41f8e1014c52f5b"
                 }
               ]
             },
@@ -164,7 +172,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                     },
                     {
-                      "bytes": "931ba7e7bca61b41b271f75bd65b4c29ba79fd9e7a2eec32823cc2f1c53dc008"
+                      "bytes": "e6f74c4e510e8d8daf1151a2e9dc206d54021d717666baacf41f8e1014c52f5b"
                     }
                   ]
                 },
@@ -186,7 +194,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "OWN_AST"
+                  "symbol": "OWN_IDX"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -206,7 +214,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "OWN_AST"
+                      "symbol": "OWN_IDX"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -225,7 +233,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
