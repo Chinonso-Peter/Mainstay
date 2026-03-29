@@ -15,6 +15,7 @@ pub enum ContractError {
     UnauthorizedOwner = 4,
     NotInitialized = 5,
     AdminAlreadyInitialized = 6,
+    Paused = 7,
 }
 
 #[contracttype]
@@ -28,7 +29,15 @@ pub struct Asset {
     pub metadata_updated_at: u64,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetInput {
+    pub asset_type: Symbol,
+    pub metadata: String,
+}
+
 const ASSET_COUNT: Symbol = symbol_short!("A_COUNT");
+const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 
 const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
 
@@ -80,12 +89,23 @@ fn owner_index_remove(env: &Env, owner: &Address, asset_id: u64) {
     env.storage().persistent().extend_ttl(&key, 518400, 518400);
 }
 
+fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+fn ensure_not_paused(env: &Env) {
+    if is_paused(env) {
+        panic_with_error!(env, ContractError::Paused);
+    }
+}
+
 #[contract]
 pub struct AssetRegistry;
 
 #[contractimpl]
 impl AssetRegistry {
     pub fn register_asset(env: Env, asset_type: Symbol, metadata: String, owner: Address) -> u64 {
+        ensure_not_paused(&env);
         owner.require_auth();
 
         // Deduplication: reject if this owner already registered identical metadata.
@@ -120,6 +140,61 @@ impl AssetRegistry {
         );
 
         id
+    }
+
+    pub fn batch_register_assets(
+        env: Env,
+        owner: Address,
+        assets: Vec<AssetInput>,
+    ) -> Vec<u64> {
+        ensure_not_paused(&env);
+        owner.require_auth();
+
+        let mut ids: Vec<u64> = Vec::new(&env);
+        let mut batch_hashes: Vec<BytesN<32>> = Vec::new(&env);
+
+        for asset_in in assets.iter() {
+            let meta_bytes = Bytes::from(asset_in.metadata.clone().to_xdr(&env));
+            let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
+
+            if env.storage().persistent().has(&dedup_key(&owner, &meta_hash)) {
+                panic_with_error!(&env, ContractError::DuplicateAsset);
+            }
+
+            for seen in batch_hashes.iter() {
+                if seen == meta_hash {
+                    panic_with_error!(&env, ContractError::DuplicateAsset);
+                }
+            }
+            batch_hashes.push_back(meta_hash.clone());
+
+            let id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0) + 1;
+            let asset = Asset {
+                asset_id: id,
+                asset_type: asset_in.asset_type.clone(),
+                metadata: asset_in.metadata.clone(),
+                owner: owner.clone(),
+                registered_at: env.ledger().timestamp(),
+                metadata_updated_at: env.ledger().timestamp(),
+            };
+
+            env.storage().persistent().set(&asset_key(id), &asset);
+            env.storage().persistent().extend_ttl(&asset_key(id), 518400, 518400);
+            env.storage().instance().set(&ASSET_COUNT, &id);
+            env.storage().persistent().set(&dedup_key(&owner, &meta_hash), &id);
+            env.storage().persistent().extend_ttl(&dedup_key(&owner, &meta_hash), 518400, 518400);
+
+            owner_index_add(&env, &owner, id);
+
+            env.events().publish(
+                (symbol_short!("REG_AST"), id),
+                (asset_in.asset_type.clone(), owner.clone(), env.ledger().timestamp()),
+            );
+
+            ids.push_back(id);
+        }
+
+        ids
     }
 
     pub fn get_asset(env: Env, asset_id: u64) -> Asset {
@@ -161,8 +236,31 @@ impl AssetRegistry {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
     }
 
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = Self::get_admin(env.clone());
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&PAUSED_KEY, &true);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = Self::get_admin(env.clone());
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&PAUSED_KEY, &false);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        is_paused(&env)
+    }
+
     /// Admin-only: Deregister (remove) an asset
     pub fn deregister_asset(env: Env, asset_id: u64) {
+        ensure_not_paused(&env);
         let admin = Self::get_admin(env.clone());
         admin.require_auth();
         
@@ -190,6 +288,7 @@ impl AssetRegistry {
     /// Owner-only: update the metadata of an existing asset (e.g. after refurbishment).
     /// Removes the old deduplication key and registers the new one.
     pub fn update_asset_metadata(env: Env, asset_id: u64, owner: Address, new_metadata: String) {
+        ensure_not_paused(&env);
         owner.require_auth();
 
         let mut asset: Asset = env
@@ -234,6 +333,7 @@ impl AssetRegistry {
     }
 
     pub fn transfer_asset(env: Env, asset_id: u64, current_owner: Address, new_owner: Address) {
+        ensure_not_paused(&env);
         current_owner.require_auth();
 
         let mut asset: Asset = env
@@ -271,6 +371,7 @@ impl AssetRegistry {
 
     /// Admin-only: upgrade the contract WASM to a new hash.
     pub fn upgrade(env: Env, admin: Address, _new_wasm_hash: BytesN<32>) {
+        ensure_not_paused(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -979,5 +1080,126 @@ mod tests {
             assert!(asset_ttl > 0, "Asset record TTL should be extended");
         });
     }
-}
+
+    #[test]
+    fn test_batch_register_assets_rejects_duplicate_existing_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        client.register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "A"), &owner);
+
+        let mut batch = Vec::new(&env);
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "A") });
+
+        let result = client.try_batch_register_assets(&owner, &batch);
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::DuplicateAsset as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_batch_register_assets_success_and_pause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let owner = Address::generate(&env);
+        let mut batch = Vec::new(&env);
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "A") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "B") });
+
+        let ids = client.batch_register_assets(&owner, &batch);
+        assert_eq!(ids.len(), 2);
+
+        client.pause(&admin);
+        let result = client.try_batch_register_assets(&owner, &batch);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32,
+            ))),
+        );
+
+        client.unpause(&admin);
+        let id3 = client.batch_register_assets(&owner, &Vec::new(&env));
+        assert_eq!(id3.len(), 0);
+    }
+
+    #[test]
+    fn test_pause_affects_all_state_changes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "Base"), &owner);
+
+        client.pause(&admin);
+
+        // register_asset
+        assert_eq!(
+            client.try_register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "A"), &owner),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+
+        // update_asset_metadata
+        assert_eq!(
+            client.try_update_asset_metadata(&id, &owner, &String::from_str(&env, "New")),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+
+        // transfer_asset
+        assert_eq!(
+            client.try_transfer_asset(&id, &owner, &Address::generate(&env)),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+
+        // deregister_asset
+        assert_eq!(
+            client.try_deregister_asset(&id),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+
+        // upgrade
+        assert_eq!(
+            client.try_upgrade(&admin, &BytesN::from_array(&env, &[0u8; 32])),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+    }
+
+    #[test]
+    fn test_batch_register_assets_internal_duplicates_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let mut batch = Vec::new(&env);
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "Duplicate") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "Duplicate") });
+
+        let result = client.try_batch_register_assets(&owner, &batch);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::DuplicateAsset as u32,
+            ))),
+        );
+    }
 }

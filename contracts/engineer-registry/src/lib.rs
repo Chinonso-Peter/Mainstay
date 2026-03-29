@@ -12,6 +12,7 @@ pub enum ContractError {
     AdminAlreadyInitialized = 5,
     UntrustedIssuer = 6,
     InvalidCredentialHash = 7,
+    Paused = 8,
 }
 
 #[contracttype]
@@ -27,6 +28,18 @@ pub struct Engineer {
 
 fn engineer_key(addr: &Address) -> (Symbol, Address) {
     (symbol_short!("ENG"), addr.clone())
+}
+
+const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
+
+fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+fn ensure_not_paused(env: &Env) {
+    if is_paused(env) {
+        panic_with_error!(env, ContractError::Paused);
+    }
 }
 
 fn admin_key() -> Symbol {
@@ -57,6 +70,7 @@ impl EngineerRegistry {
         issuer: Address,
         validity_period: u64,
     ) {
+        ensure_not_paused(&env);
         issuer.require_auth();
         if !env.storage().instance().has(&trusted_key(&issuer)) {
             panic_with_error!(&env, ContractError::UntrustedIssuer);
@@ -110,6 +124,7 @@ impl EngineerRegistry {
     }
 
     pub fn revoke_credential(env: Env, engineer: Address) {
+        ensure_not_paused(&env);
         let mut record: Engineer = env
             .storage()
             .persistent()
@@ -153,6 +168,28 @@ impl EngineerRegistry {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
     }
 
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = Self::get_admin(env.clone());
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&PAUSED_KEY, &true);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = Self::get_admin(env.clone());
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&PAUSED_KEY, &false);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        is_paused(&env)
+    }
+
     pub fn is_trusted_issuer(env: Env, issuer: Address) -> bool {
         env.storage().instance().has(&trusted_key(&issuer))
     }
@@ -165,6 +202,7 @@ impl EngineerRegistry {
     }
 
     pub fn add_trusted_issuer(env: Env, admin: Address, issuer: Address) {
+        ensure_not_paused(&env);
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&admin_key())
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
@@ -185,6 +223,7 @@ impl EngineerRegistry {
     }
 
     pub fn remove_trusted_issuer(env: Env, admin: Address, issuer: Address) {
+        ensure_not_paused(&env);
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&admin_key())
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
@@ -212,6 +251,7 @@ impl EngineerRegistry {
 
     /// Admin-only: upgrade the contract WASM to a new hash.
     pub fn upgrade(env: Env, admin: Address, _new_wasm_hash: BytesN<32>) {
+        ensure_not_paused(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -520,6 +560,31 @@ mod tests {
     }
 
     #[test]
+    fn test_pause_and_unpause_in_engineer_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.pause(&admin);
+        let result = client.try_register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            ))),
+        );
+
+        client.unpause(&admin);
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        assert!(client.verify_engineer(&engineer));
+    }
+
+    #[test]
     fn test_register_engineer_untrusted_issuer_returns_error() {
         let env = Env::default();
         env.mock_all_auths();
@@ -682,5 +747,51 @@ mod tests {
 
         let (emitted_issuer,): (Address,) = data.try_into_val(&env).unwrap();
         assert_eq!(emitted_issuer, issuer);
+    }
+
+    #[test]
+    fn test_pause_affects_all_state_changes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+
+        client.pause(&admin);
+
+        // register_engineer
+        assert_eq!(
+            client.try_register_engineer(&Address::generate(&env), &hash, &issuer, &100),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+
+        // revoke_credential
+        assert_eq!(
+            client.try_revoke_credential(&engineer),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+
+        // add_trusted_issuer
+        assert_eq!(
+            client.try_add_trusted_issuer(&admin, &Address::generate(&env)),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+
+        // remove_trusted_issuer
+        assert_eq!(
+            client.try_remove_trusted_issuer(&admin, &issuer),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+
+        // upgrade
+        assert_eq!(
+            client.try_upgrade(&admin, &BytesN::from_array(&env, &[0u8; 32])),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
     }
 }
