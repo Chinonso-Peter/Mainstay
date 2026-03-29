@@ -7,6 +7,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_wit
 pub enum ContractError {
     CredentialAlreadyRevoked = 1,
     UnauthorizedAdmin = 2,
+    EngineerNotFound = 3,
+    NotInitialized = 4,
 }
 
 #[contracttype]
@@ -97,21 +99,24 @@ impl EngineerRegistry {
             .storage()
             .persistent()
             .get(&engineer_key(&engineer))
-            .expect("engineer not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EngineerNotFound));
         record.issuer.require_auth();
-        assert!(record.active, "credential already revoked");
+        if !record.active {
+            panic_with_error!(&env, ContractError::CredentialAlreadyRevoked);
+        }
+        // Extend TTL before write to ensure consistency even on near-expired entries
+        env.storage().persistent().extend_ttl(&engineer_key(&engineer), 518400, 518400);
         record.active = false;
         env.storage()
             .persistent()
             .set(&engineer_key(&engineer), &record);
-        env.storage().persistent().extend_ttl(&engineer_key(&engineer), 518400, 518400);
     }
 
     pub fn get_engineer(env: Env, engineer: Address) -> Engineer {
         env.storage()
             .persistent()
             .get(&engineer_key(&engineer))
-            .expect("engineer not found")
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EngineerNotFound))
     }
 
     pub fn initialize_admin(env: Env, admin: Address) {
@@ -123,7 +128,7 @@ impl EngineerRegistry {
 
     pub fn get_admin(env: Env) -> Address {
         env.storage().instance().get(&admin_key())
-            .expect("admin not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
     }
 
     pub fn is_trusted_issuer(env: Env, issuer: Address) -> bool {
@@ -132,7 +137,8 @@ impl EngineerRegistry {
 
     pub fn add_trusted_issuer(env: Env, admin: Address, issuer: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&admin_key()).expect("admin not initialized");
+        let stored_admin: Address = env.storage().instance().get(&admin_key())
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
@@ -141,7 +147,8 @@ impl EngineerRegistry {
 
     pub fn remove_trusted_issuer(env: Env, admin: Address, issuer: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&admin_key()).expect("admin not initialized");
+        let stored_admin: Address = env.storage().instance().get(&admin_key())
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
@@ -164,7 +171,7 @@ impl EngineerRegistry {
             .storage()
             .instance()
             .get(&admin_key())
-            .expect("admin not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
@@ -459,5 +466,72 @@ mod tests {
         let record = client.get_engineer(&engineer);
         assert_eq!(record.issued_at, issued_at);
         assert_eq!(record.expires_at, issued_at + validity_period);
+    }
+
+    // --- Issue #141: get_engineer structured error ---
+
+    #[test]
+    fn test_get_engineer_unknown_returns_structured_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let unknown = Address::generate(&env);
+        let result = client.try_get_engineer(&unknown);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::EngineerNotFound as u32,
+            ))),
+        );
+    }
+
+    // --- Issue #142: get_admin structured error before initialization ---
+
+    #[test]
+    fn test_get_admin_before_init_returns_structured_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EngineerRegistry, ());
+        let client = EngineerRegistryClient::new(&env, &contract_id);
+
+        let result = client.try_get_admin();
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::NotInitialized as u32,
+            ))),
+        );
+    }
+
+    // --- Issue #143: revoke_credential extends TTL before write ---
+
+    #[test]
+    fn test_revoke_credential_ttl_extended_before_write() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+
+        // Simulate near-expiry by advancing ledger close to TTL threshold
+        env.ledger().with_mut(|li| li.sequence = li.sequence + 518399);
+
+        client.revoke_credential(&engineer);
+
+        // After revocation the entry must still be accessible and marked inactive
+        let record = client.get_engineer(&engineer);
+        assert!(!record.active);
+
+        let contract_id = client.address.clone();
+        let ttl = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&engineer_key(&engineer))
+        });
+        assert!(ttl > 0, "TTL must be extended after revocation");
     }
 }

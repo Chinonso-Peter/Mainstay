@@ -13,6 +13,7 @@ pub enum ContractError {
     UnauthorizedAdmin = 3,
     HistoryCapReached = 4,
     AssetNotFound = 5,
+    NotInitialized = 6,
 }
 
 #[contracttype]
@@ -159,7 +160,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&CONFIG)
-            .expect("config not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
@@ -183,7 +184,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&CONFIG)
-            .expect("config not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
@@ -207,7 +208,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&ASSET_REGISTRY)
-            .expect("asset registry not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         let asset_registry_client =
             asset_registry::AssetRegistryClient::new(&env, &asset_registry);
         asset_registry_client.get_asset(&asset_id);
@@ -227,7 +228,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&CONFIG)
-            .expect("config not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
         let mut history: Vec<MaintenanceRecord> = env
             .storage()
@@ -307,7 +308,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&ASSET_REGISTRY)
-            .expect("asset registry not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         let asset_registry_client = asset_registry::AssetRegistryClient::new(&env, &asset_registry);
         asset_registry_client.get_asset(&asset_id);
 
@@ -333,7 +334,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&CONFIG)
-            .expect("config not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
         // Validate all records fit before writing any
         if history.len() + records.len() > config.max_history {
@@ -347,6 +348,11 @@ impl Lifecycle {
             .persistent()
             .get(&score_key(asset_id))
             .unwrap_or(0u32);
+        let mut score_history: Vec<ScoreEntry> = env
+            .storage()
+            .persistent()
+            .get(&score_history_key(asset_id))
+            .unwrap_or(Vec::new(&env));
 
         for record in records.iter() {
             let weight = get_task_weight(&env, &record.task_type);
@@ -358,10 +364,12 @@ impl Lifecycle {
                 engineer: engineer.clone(),
                 timestamp,
             });
+            score_history.push_back(ScoreEntry { timestamp, score });
         }
 
         env.storage().persistent().set(&history_key(asset_id), &history);
         env.storage().persistent().set(&score_key(asset_id), &score);
+        env.storage().persistent().set(&score_history_key(asset_id), &score_history);
         env.storage().persistent().set(&last_update_key(asset_id), &timestamp);
     }
 
@@ -389,7 +397,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&CONFIG)
-            .expect("config not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
         let current_time = env.ledger().timestamp();
         let time_elapsed = current_time.saturating_sub(last_update);
@@ -422,6 +430,33 @@ impl Lifecycle {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Returns a paginated slice of the maintenance history.
+    /// `offset` is the zero-based start index; `limit` is the max number of records to return.
+    pub fn get_maintenance_history_page(
+        env: Env,
+        asset_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<MaintenanceRecord> {
+        let history: Vec<MaintenanceRecord> = env
+            .storage()
+            .persistent()
+            .get(&history_key(asset_id))
+            .unwrap_or(Vec::new(&env));
+
+        let len = history.len();
+        if offset >= len || limit == 0 {
+            return Vec::new(&env);
+        }
+
+        let end = (offset + limit).min(len);
+        let mut page = Vec::new(&env);
+        for i in offset..end {
+            page.push_back(history.get(i).unwrap());
+        }
+        page
+    }
+
     pub fn get_last_service(env: Env, asset_id: u64) -> MaintenanceRecord {
         let history: Vec<MaintenanceRecord> = env
             .storage()
@@ -440,7 +475,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&ASSET_REGISTRY)
-            .expect("asset registry not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         let asset_registry_client =
             asset_registry::AssetRegistryClient::new(&env, &asset_registry);
         asset_registry_client.get_asset(&asset_id);
@@ -489,7 +524,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&ASSET_REGISTRY)
-            .expect("asset registry not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         let asset_registry_client =
             asset_registry::AssetRegistryClient::new(&env, &asset_registry);
         asset_registry_client.get_asset(&asset_id);
@@ -506,7 +541,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&CONFIG)
-            .expect("config not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
@@ -526,7 +561,7 @@ impl Lifecycle {
             .storage()
             .instance()
             .get(&CONFIG)
-            .expect("config not set");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
@@ -1412,5 +1447,86 @@ mod tests {
                 ContractError::UnauthorizedAdmin as u32,
             ))),
         );
+    }
+
+    // --- Issue #142: NotInitialized structured error ---
+
+    #[test]
+    fn test_get_collateral_score_before_init_returns_structured_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Deploy lifecycle without calling initialize
+        let lifecycle_id = env.register(Lifecycle, ());
+        let client = LifecycleClient::new(&env, &lifecycle_id);
+
+        let result = client.try_get_collateral_score(&1u64);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::NotInitialized as u32,
+            ))),
+        );
+    }
+
+    // --- Issue #144: batch_submit_maintenance updates score_history_key ---
+
+    #[test]
+    fn test_batch_submit_score_history_length_matches_records() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        let mut records = Vec::new(&env);
+        records.push_back(BatchRecord {
+            task_type: symbol_short!("OIL_CHG"),
+            notes: String::from_str(&env, "First"),
+        });
+        records.push_back(BatchRecord {
+            task_type: symbol_short!("INSPECT"),
+            notes: String::from_str(&env, "Second"),
+        });
+        records.push_back(BatchRecord {
+            task_type: symbol_short!("ENGINE"),
+            notes: String::from_str(&env, "Third"),
+        });
+
+        client.batch_submit_maintenance(&asset_id, &records, &engineer);
+
+        let score_history = client.get_score_history(&asset_id);
+        assert_eq!(score_history.len(), 3, "score_history length must match batch record count");
+    }
+
+    #[test]
+    fn test_get_maintenance_history_page() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        for _ in 0..5 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, "oil change"),
+                &engineer,
+            );
+        }
+
+        // First page: offset=0, limit=2 → 2 records
+        assert_eq!(client.get_maintenance_history_page(&asset_id, &0, &2).len(), 2);
+        // Second page: offset=2, limit=2 → 2 records
+        assert_eq!(client.get_maintenance_history_page(&asset_id, &2, &2).len(), 2);
+        // Third page: offset=4, limit=2 → 1 record (only one left)
+        assert_eq!(client.get_maintenance_history_page(&asset_id, &4, &2).len(), 1);
+        // Out-of-bounds offset → empty
+        assert_eq!(client.get_maintenance_history_page(&asset_id, &10, &2).len(), 0);
+        // limit=0 → empty
+        assert_eq!(client.get_maintenance_history_page(&asset_id, &0, &0).len(), 0);
     }
 }
