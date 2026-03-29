@@ -51,6 +51,7 @@ pub struct Config {
     pub score_increment: u32,
     pub decay_rate: u32,
     pub decay_interval: u64,
+    pub eligibility_threshold: u32,
 }
 
 const ASSET_REGISTRY: Symbol = symbol_short!("REGISTRY");
@@ -60,6 +61,7 @@ const DEFAULT_MAX_HISTORY: u32 = 200;
 const DEFAULT_SCORE_INCREMENT: u32 = 5;
 const DEFAULT_DECAY_RATE: u32 = 5;
 const DEFAULT_DECAY_INTERVAL: u64 = 2592000; // 30 days in seconds
+const DEFAULT_ELIGIBILITY_THRESHOLD: u32 = 50;
 
 fn history_key(asset_id: u64) -> (Symbol, u64) {
     (symbol_short!("HIST"), asset_id)
@@ -150,6 +152,7 @@ impl Lifecycle {
             score_increment: DEFAULT_SCORE_INCREMENT,
             decay_rate: DEFAULT_DECAY_RATE,
             decay_interval: DEFAULT_DECAY_INTERVAL,
+            eligibility_threshold: DEFAULT_ELIGIBILITY_THRESHOLD,
         };
         env.storage().instance().set(&CONFIG, &config);
 
@@ -205,6 +208,23 @@ impl Lifecycle {
 
         config.decay_rate = decay_rate;
         config.decay_interval = decay_interval;
+        env.storage().instance().set(&CONFIG, &config);
+    }
+
+    /// Admin-only: update the eligibility threshold for collateral scoring.
+    pub fn update_eligibility_threshold(env: Env, admin: Address, threshold: u32) {
+        admin.require_auth();
+
+        let mut config: Config = env
+            .storage()
+            .instance()
+            .get(&CONFIG)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        if config.admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+
+        config.eligibility_threshold = threshold;
         env.storage().instance().set(&CONFIG, &config);
     }
 
@@ -565,8 +585,12 @@ impl Lifecycle {
             asset_registry::AssetRegistryClient::new(&env, &asset_registry);
         asset_registry_client.get_asset(&asset_id);
 
-        let threshold = 50u32;
-        Self::get_collateral_score(env, asset_id) >= threshold
+        let config: Config = env
+            .storage()
+            .instance()
+            .get(&CONFIG)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        Self::get_collateral_score(env, asset_id) >= config.eligibility_threshold
     }
 
     pub fn get_asset_registry(env: Env) -> Address {
