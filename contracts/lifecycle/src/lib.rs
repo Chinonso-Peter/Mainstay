@@ -710,7 +710,7 @@ mod tests {
     use asset_registry::{AssetRegistry, AssetRegistryClient};
     use soroban_sdk::{
         symbol_short,
-        testutils::{Address as _, Events, Ledger},
+        testutils::{storage::Persistent as _, Address as _, Events, Ledger},
         BytesN, Env, String, TryIntoVal,
     };
 
