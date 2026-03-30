@@ -407,8 +407,6 @@ impl Lifecycle {
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
-        validate_notes_length(&env, &notes, config.max_notes_length);
-
         let mut history: Vec<MaintenanceRecord> = env
             .storage()
             .persistent()
