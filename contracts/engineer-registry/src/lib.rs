@@ -425,9 +425,14 @@ impl EngineerRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
 
+        env.events().publish(
+            (symbol_short!("UPGRADE"), admin.clone()),
+            new_wasm_hash.clone(),
+        );
+
         #[cfg(not(test))]
         {
-            env.deployer().update_current_contract_wasm(_new_wasm_hash);
+            env.deployer().update_current_contract_wasm(new_wasm_hash);
         }
     }
 }
@@ -667,6 +672,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_upgrade_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);
+        client.upgrade(&admin, &new_wasm_hash);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1); // upgrade event
+        let upgrade_event = &events[0];
+        assert_eq!(upgrade_event.0, (symbol_short!("UPGRADE"), admin));
+        assert_eq!(upgrade_event.1, new_wasm_hash);
+    }
+
     // --- get_engineers_by_issuer tests ---
 
     #[test]
@@ -797,6 +818,27 @@ mod tests {
             client.get_engineers_by_issuer(&issuer_b).get(0).unwrap(),
             e2
         );
+    }
+
+    #[test]
+    fn test_get_engineer_count_by_issuer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let e1 = Address::generate(&env);
+        let e2 = Address::generate(&env);
+
+        // Empty issuer
+        assert_eq!(client.get_engineer_count_by_issuer(&issuer), 0);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer, &31_536_000);
+        assert_eq!(client.get_engineer_count_by_issuer(&issuer), 1);
+
+        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer, &31_536_000);
+        assert_eq!(client.get_engineer_count_by_issuer(&issuer), 2);
     }
 
     #[test]

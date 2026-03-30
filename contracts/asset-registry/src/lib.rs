@@ -503,7 +503,7 @@ impl AssetRegistry {
     /// # Panics
     /// - [`ContractError::NotInitialized`] if the admin has not been initialized
     /// - [`ContractError::UnauthorizedAdmin`] if caller is not the admin
-    pub fn upgrade(env: Env, admin: Address, _new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         ensure_not_paused(&env);
         admin.require_auth();
 
@@ -516,9 +516,14 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
 
+        env.events().publish(
+            (symbol_short!("UPGRADE"), admin.clone()),
+            new_wasm_hash.clone(),
+        );
+
         #[cfg(not(test))]
         {
-            env.deployer().update_current_contract_wasm(_new_wasm_hash);
+            env.deployer().update_current_contract_wasm(new_wasm_hash);
         }
     }
 }
