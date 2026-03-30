@@ -772,6 +772,9 @@ impl Lifecycle {
             .unwrap_or(0)
     }
 
+pub fn is_collateral_eligible(env: Env, asset_id: u64) -> bool {
+        Self::get_collateral_score(env, asset_id) >= 50
+    /// Returns the full score trend: one (timestamp, score) entry per maintenance event.
     /// Get the complete score history for an asset.
     /// Returns one (timestamp, score) entry per maintenance event.
     ///
@@ -1059,6 +1062,10 @@ impl Lifecycle {
             (admin, env.ledger().timestamp()),
         );
     }
+
+    pub fn batch_is_collateral_eligible(env: Env, asset_ids: Vec<u64>) -> Vec<bool> {
+        asset_ids.iter().map(|&id| Self::is_collateral_eligible(env.clone(), id)).collect()
+    }
 }
 
 #[cfg(test)]
@@ -1167,6 +1174,9 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
+        let engineer = Address::generate(&env);
+        // Fill to cap
+for _ in 0..3 {
         let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 3);
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
